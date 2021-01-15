@@ -1,0 +1,1 @@
+* TODO Error signaling system. Abort evaluation of buffer, try reading another line.
