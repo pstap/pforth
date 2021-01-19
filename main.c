@@ -71,8 +71,9 @@ char* alloc_label(struct label_allocator* a, char* label) {
 /* Should be `word` */
 struct dict_entry {
     size_t label_size;
+    bool is_colon_word;
     char* label;
-    void (*fptr)(void);
+    void (**fptr)(void);
 };
 
 #define MAX_DICT_ENTRIES 1024
@@ -89,7 +90,8 @@ struct dict_allocator DICT_ALLOC;
 struct dict_entry* alloc_dict_entry(struct dict_allocator* da,
                                     struct label_allocator* la,
                                     char* label,
-                                    void (*fptr)(void)) {
+                                    bool is_colon_word,
+                                    void (**fptr)(void)) {
     // allocation failure, can't allocate any more
     if(da->current_size == da->max_size) {
         return NULL;
@@ -103,6 +105,7 @@ struct dict_entry* alloc_dict_entry(struct dict_allocator* da,
     current->label = new_label;
     current->label_size = string_length_safe(current->label, MAX_LABEL_SIZE);
     current->fptr = fptr;
+    current->is_colon_word = is_colon_word;
 
     ++da->current_size;
 
@@ -198,28 +201,71 @@ struct pforth_state {
 
 struct pforth_state STATE = {MODE_EXECUTE};
 
+
+/* RETURN STACK */
+void (***ret_stack)(void) = NULL;
+int ret_stack_size = 0;
+
+#define RET_PUSH(X) ret_stack[ret_stack_size++] = X
+#define RET_POP() ret_stack[--ret_stack_size]
+#define RET_STACK_TOP() ret_stack[ret_stack_size - 1]
+
+/* Interpreter state */
+struct interpreter_state {
+    void (*w)(void);
+    void (**ip)(void);
+};
+struct interpreter_state INT_STATE;
+
+#define NEXT() do { \
+        INT_STATE.w = *INT_STATE.ip++; \
+        if(INT_STATE.w == NULL) \
+            return; \
+        INT_STATE.w(); \
+    } while(0)
+
+void docol() {
+    void (**ret_addr)(void) = INT_STATE.ip + 1;
+    RET_PUSH(ret_addr);
+    INT_STATE.ip = (void (**)(void))(*INT_STATE.ip);
+    NEXT();
+}
+
+void ret() {
+    if(ret_stack_size == 0)
+        return;
+    else {
+        INT_STATE.ip = RET_POP();
+        NEXT();
+    }
+}
+
 /* TODO ALL OF THESE SHOULD HANDLE ERROR CASES LIKE STACK UNDERFLOW */
 void OP_ADD(void) {
     const int64_t y = stack_pop();
     const int64_t x = stack_pop();
     stack_push(x + y);
+    NEXT();
 }
 
 void OP_SUB(void) {
     const int64_t y = stack_pop();
     const int64_t x = stack_pop();
     stack_push(x - y);
+    NEXT();
 }
 
 void OP_MUL(void) {
     const int64_t y = stack_pop();
     const int64_t x = stack_pop();
     stack_push(x * y);
+    NEXT();
 }
 
 void OP_DUP(void) {
     const int64_t x = STACK.top[STACK.size - 1];
     stack_push(x);
+    NEXT();
 }
 
 void OP_SWAP(void) {
@@ -229,15 +275,18 @@ void OP_SWAP(void) {
     const int64_t temp = STACK.top[STACK.size - 1];
     STACK.top[STACK.size - 1] = STACK.top[STACK.size - 2];
     STACK.top[STACK.size - 2] = temp;
+    NEXT();
 }
 
 void OP_POP_PRINT(void) {
     const int64_t p = stack_pop();
     fprintf(stdout, "%ld", p);
+    NEXT();
 }
 
 void OP_CR(void) {
     fprintf(stdout, "\n");
+    NEXT();
 }
 
 void META_DICT(void) {
@@ -277,6 +326,21 @@ void OP_END_COMPILE(void) {
     STATE.mode = MODE_EXECUTE;
 }
 
+char* BASE_LABELS[] = {
+    "+", "-", "*", ".", "CR", "DUP", "SWAP"
+};
+static void (*BASE_WORDS[])(void) = {
+    &OP_ADD,
+    &OP_SUB,
+    &OP_MUL,
+    &OP_POP_PRINT,
+    &OP_CR,
+    &OP_DUP,
+    &OP_SWAP
+};
+
+void (*SQR_IMP[])(void)  = {&OP_DUP, &OP_MUL, &ret};
+
 /* Initialize buffers and sizes */
 bool init()
 {
@@ -301,6 +365,12 @@ bool init()
         return false;
     }
 
+    ret_stack = malloc(sizeof(void (**)(void)) * 4096);
+    if(ret_stack == NULL) {
+        fprintf(stderr, "Could not initialize RETURN STACK\n");
+        return false;
+    }
+
     // 4K of label memory
     LABEL_MEM = malloc(sizeof(char) * LABEL_MEM_SIZE);
     DICT = malloc(sizeof(struct dict_entry) * MAX_DICT_ENTRIES);
@@ -309,22 +379,20 @@ bool init()
     init_label_allocator(&LABEL_ALLOC, LABEL_MEM, LABEL_MEM_SIZE);
 
     /* Completely unnecessary macro */
-#define DICT_ENTRY(WORD,FUNC) alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, WORD, &FUNC)
+#define DICT_ENTRY(I) alloc_dict_entry(&DICT_ALLOC, \
+    &LABEL_ALLOC, BASE_LABELS[I], false, (void (**)(void))BASE_WORDS[I])
 
     /* add primary words to dict */
-    DICT_ENTRY(":", OP_COMPILE);
-    DICT_ENTRY(";", OP_END_COMPILE);
-    DICT_ENTRY("+", OP_ADD);
-    DICT_ENTRY("-", OP_SUB);
-    DICT_ENTRY("*", OP_MUL);
-    DICT_ENTRY(".", OP_POP_PRINT);
-    DICT_ENTRY("CR", OP_CR);
-    DICT_ENTRY("DUP", OP_DUP);
-    DICT_ENTRY("SWAP", OP_SWAP);
-    DICT_ENTRY("DICT", META_DICT);
-    DICT_ENTRY("WORDS", META_WORDS);
-    DICT_ENTRY(".s", META_STACK);
-    DICT_ENTRY("FORTH", META_FORTH);
+    DICT_ENTRY(0);
+    DICT_ENTRY(1);
+    DICT_ENTRY(2);
+    DICT_ENTRY(3);
+    DICT_ENTRY(4);
+    DICT_ENTRY(5);
+    DICT_ENTRY(6);
+
+    /* hand crafet sqr */
+    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "SQR", true, SQR_IMP);
 
 #undef DICT_ENTRY
     return true;
@@ -380,10 +448,17 @@ void cleanup() {
     free(LABEL_MEM);
     free(DICT);
     free(STACK.top);
+    free(ret_stack);
     free(INPUT_BUFFER);
     free(CURRENT_WORD);
 }
 
+void (**PROGRAM[3])(void) = {NULL, NULL, NULL};
+
+void execute_word() {
+    INT_STATE.ip = PROGRAM;
+    NEXT();
+}
 
 
 int main(void)
@@ -401,6 +476,8 @@ int main(void)
     fprintf(stdout, "Welcome to pforth\n");
     fprintf(stdout, "Type DICT<ENTER> for a DICT listing, or WORDS<ENTER> for all words\n");
     fprintf(stdout, "\n");
+
+    print_dict(&DICT_ALLOC);
 
     while(run) {
         /* Interactive */
@@ -422,7 +499,16 @@ int main(void)
                 /* Try pushing it to the stack */
                 stack_push((int64_t)atoi(CURRENT_WORD));
             } else {
-                w->fptr();
+                if(w->is_colon_word) {
+                    PROGRAM[0] = &docol;
+                    PROGRAM[1] = w->fptr;
+                    PROGRAM[2] = NULL;
+                } else {
+                    PROGRAM[0] = w->fptr;
+                    PROGRAM[1] = NULL;
+                    PROGRAM[2] = NULL;
+                }
+                execute_word();
             }
         }
     }

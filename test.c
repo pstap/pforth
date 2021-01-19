@@ -122,7 +122,8 @@ int main() {
     init();
 
     ARG_PUSH(5);
-    execute_word(&sqr_word);
+    ARG_PUSH(6);
+    execute_word(&mul_word);
     print_arg_stack();
 
     printf("----------\n");
