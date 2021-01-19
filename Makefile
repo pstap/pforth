@@ -14,5 +14,9 @@ main.o: main.c
 debug:
 	$(CC) -o $(EXE) $(CCFLAGS) -ggdb main.c
 
+
+test: test.c
+	$(CC) -o test $(CCFLAGS) -ggdb test.c
+
 clean:
 	rm *.o $(EXE)

@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,12 +12,14 @@ void copy_string_safe(char* dest, const char* src, size_t max_size) {
     /* TODO This doesn't insert null terminator - probably doesn't work without debug mode */
     for(size_t i = 0; i < max_size; ++i) {
         dest[i] = src[i];
+        if(src[i] == '\0')
+            break;
     }
 }
 int string_length_safe(const char* s, size_t max_size) {
-    for(int i = 0; i < max_size; ++i) {
+    for(size_t i = 0; i < max_size; ++i) {
         if(s[i] == '\0')
-            return i;
+            return (int)i;
     }
     return -1;
 }
@@ -55,8 +59,7 @@ char* alloc_label(struct label_allocator* a, char* label) {
     }
     char* label_start = a->current;
 
-    copy_string_safe(a->current, label, label_size);
-    a->current[label_size] = '\0';
+    copy_string_safe(a->current, label, MAX_LABEL_SIZE);
     a->bytes_allocd += alloc_size;
     a->current += alloc_size;
     ++a->labels_allocd;
@@ -159,12 +162,13 @@ struct dict_entry* find_in_dict(struct dict_allocator* a, char* word) {
 }
 
 void print_dict_node(struct dict_entry* e) {
-    printf("\"%s\" (%ld)\t%p\n", e->label, e->label_size, e->fptr);
+    printf("%p\t\"%s\"\n", (void*)e, e->label);
 }
 
 void print_dict(struct dict_allocator* a) {
-    for(int i = 0; i < a->current_size; ++i) {
-        fprintf(stdout, "%d\t", i);
+    fprintf(stdout, "i\tAddr\t\tWord\n");
+    for(size_t i = 0; i < a->current_size; ++i) {
+        fprintf(stdout, "%ld\t", i);
         print_dict_node(&a->start[i]);
     }
 }
@@ -181,6 +185,18 @@ int64_t stack_pop(void) {
     }
     return STACK.top[--STACK.size];
 }
+
+/* Runtime state */
+enum pforth_mode {
+    MODE_EXECUTE = 0,
+    MODE_COMPILE = 1
+};
+
+struct pforth_state {
+    enum pforth_mode mode;
+};
+
+struct pforth_state STATE = {MODE_EXECUTE};
 
 /* TODO ALL OF THESE SHOULD HANDLE ERROR CASES LIKE STACK UNDERFLOW */
 void OP_ADD(void) {
@@ -231,7 +247,7 @@ void META_DICT(void) {
 void META_WORDS(void) {
     struct dict_entry* n = DICT_ALLOC.start;
     fprintf(stdout, "[");
-    for(int i = 0; i < DICT_ALLOC.current_size; ++i) {
+    for(size_t i = 0; i < DICT_ALLOC.current_size; ++i) {
         if(i == (DICT_ALLOC.current_size - 1)) {
             fprintf(stdout, "%s", n[i].label);
         } else {
@@ -247,6 +263,18 @@ void META_STACK(void) {
         fprintf(stdout, "%ld ", (int64_t) STACK.top[i]);
     }
     fprintf(stdout, ") (%ld)\n", STACK.size);
+}
+
+void META_FORTH(void) {
+    fprintf(stdout, "STATE: %d\n", STATE.mode);
+}
+
+void OP_COMPILE(void) {
+    STATE.mode = MODE_COMPILE;
+}
+
+void OP_END_COMPILE(void) {
+    STATE.mode = MODE_EXECUTE;
 }
 
 /* Initialize buffers and sizes */
@@ -280,17 +308,25 @@ bool init()
     init_dict_allocator(&DICT_ALLOC, DICT, MAX_DICT_ENTRIES);
     init_label_allocator(&LABEL_ALLOC, LABEL_MEM, LABEL_MEM_SIZE);
 
+    /* Completely unnecessary macro */
+#define DICT_ENTRY(WORD,FUNC) alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, WORD, &FUNC)
+
     /* add primary words to dict */
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "+", &OP_ADD);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "-", &OP_SUB);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "*", &OP_MUL);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, ".", &OP_POP_PRINT);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "CR", &OP_CR);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "DUP", &OP_DUP);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "SWAP", &OP_SWAP);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "DICT", &META_DICT);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "WORDS", &META_WORDS);
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, ".s", &META_STACK);
+    DICT_ENTRY(":", OP_COMPILE);
+    DICT_ENTRY(";", OP_END_COMPILE);
+    DICT_ENTRY("+", OP_ADD);
+    DICT_ENTRY("-", OP_SUB);
+    DICT_ENTRY("*", OP_MUL);
+    DICT_ENTRY(".", OP_POP_PRINT);
+    DICT_ENTRY("CR", OP_CR);
+    DICT_ENTRY("DUP", OP_DUP);
+    DICT_ENTRY("SWAP", OP_SWAP);
+    DICT_ENTRY("DICT", META_DICT);
+    DICT_ENTRY("WORDS", META_WORDS);
+    DICT_ENTRY(".s", META_STACK);
+    DICT_ENTRY("FORTH", META_FORTH);
+
+#undef DICT_ENTRY
     return true;
 }
 
@@ -307,7 +343,7 @@ typedef enum input_status {
 input_status_e next_word() {
     WORD_SIZE = 0;
 
-    if(INPUT_SIZE == 0 || INPUT_SIZE == -1) {
+    if(INPUT_SIZE == 0 || INPUT_SIZE == -1UL) {
         return STATUS_EMPTY;
     }
 
@@ -348,7 +384,9 @@ void cleanup() {
     free(CURRENT_WORD);
 }
 
-int main(int argc, char* argv[])
+
+
+int main(void)
 {
     const bool init_success = init();
     input_status_e status;
