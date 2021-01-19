@@ -67,6 +67,10 @@ char* alloc_label(struct label_allocator* a, char* label) {
     return label_start;
 }
 
+/* THREAD ALLOCATOR */
+void (**THREAD_MEM)(void);
+int THREAD_MEM_SIZE = 0;
+
 /* DICTIONARY */
 /* Should be `word` */
 struct dict_entry {
@@ -289,8 +293,14 @@ void OP_CR(void) {
     NEXT();
 }
 
+void OP_PUSH(void) {
+    stack_push((int64_t)*INT_STATE.ip++);
+    NEXT();
+}
+
 void META_DICT(void) {
     print_dict(&DICT_ALLOC);
+    NEXT();
 }
 
 void META_WORDS(void) {
@@ -312,6 +322,7 @@ void META_STACK(void) {
         fprintf(stdout, "%ld ", (int64_t) STACK.top[i]);
     }
     fprintf(stdout, ") (%ld)\n", STACK.size);
+    NEXT();
 }
 
 void META_FORTH(void) {
@@ -327,19 +338,20 @@ void OP_END_COMPILE(void) {
 }
 
 char* BASE_LABELS[] = {
-    "+", "-", "*", ".", "CR", "DUP", "SWAP"
+    "+", "-", "*", ".", "PUSH", "CR", "DUP", "SWAP", ".s", ".d"
 };
 static void (*BASE_WORDS[])(void) = {
     &OP_ADD,
     &OP_SUB,
     &OP_MUL,
     &OP_POP_PRINT,
+    &OP_PUSH,
     &OP_CR,
     &OP_DUP,
-    &OP_SWAP
+    &OP_SWAP,
+    &META_STACK,
+    &META_DICT
 };
-
-void (*SQR_IMP[])(void)  = {&OP_DUP, &OP_MUL, &ret};
 
 /* Initialize buffers and sizes */
 bool init()
@@ -375,6 +387,9 @@ bool init()
     LABEL_MEM = malloc(sizeof(char) * LABEL_MEM_SIZE);
     DICT = malloc(sizeof(struct dict_entry) * MAX_DICT_ENTRIES);
 
+    // INIT THREAD MEM
+    THREAD_MEM = malloc(sizeof(void(*)(void)) * 4096);
+
     init_dict_allocator(&DICT_ALLOC, DICT, MAX_DICT_ENTRIES);
     init_label_allocator(&LABEL_ALLOC, LABEL_MEM, LABEL_MEM_SIZE);
 
@@ -390,9 +405,9 @@ bool init()
     DICT_ENTRY(4);
     DICT_ENTRY(5);
     DICT_ENTRY(6);
-
-    /* hand crafet sqr */
-    alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, "SQR", true, SQR_IMP);
+    DICT_ENTRY(7);
+    DICT_ENTRY(8);
+    DICT_ENTRY(9);
 
 #undef DICT_ENTRY
     return true;
@@ -451,6 +466,7 @@ void cleanup() {
     free(ret_stack);
     free(INPUT_BUFFER);
     free(CURRENT_WORD);
+    free(THREAD_MEM);
 }
 
 void (**PROGRAM[3])(void) = {NULL, NULL, NULL};
@@ -479,36 +495,74 @@ int main(void)
 
     print_dict(&DICT_ALLOC);
 
+    bool first_entry = false;
+
     while(run) {
         /* Interactive */
+        if (STATE.mode == MODE_COMPILE) {
+            fprintf(stdout, "COMPILE");
+        }
         fprintf(stdout, "> ");
         get_input_from_stdin();
 
         /* Process input */
         while(1) {
             status = next_word();
-            /* HERE WE CHANGE BEHAVIOUR BASED ON COMPILE VS NON-COMPILE MODE */
             if(status == STATUS_MORE) {
                 break;
             } else if(status == STATUS_EMPTY)  {
                 run = false;
                 break;
             }
-            struct dict_entry* w = find_in_dict(&DICT_ALLOC, CURRENT_WORD);
-            if(w == NULL) {
-                /* Try pushing it to the stack */
-                stack_push((int64_t)atoi(CURRENT_WORD));
-            } else {
-                if(w->is_colon_word) {
-                    PROGRAM[0] = &docol;
-                    PROGRAM[1] = w->fptr;
-                    PROGRAM[2] = NULL;
-                } else {
-                    PROGRAM[0] = w->fptr;
-                    PROGRAM[1] = NULL;
-                    PROGRAM[2] = NULL;
+            if(STATE.mode == MODE_COMPILE) {
+                if(first_entry) {
+                    struct dict_entry* e = alloc_dict_entry(&DICT_ALLOC, &LABEL_ALLOC, CURRENT_WORD, true, (THREAD_MEM+THREAD_MEM_SIZE));
+                    first_entry = false;
+                    continue;
                 }
-                execute_word();
+
+                // Leave compiler
+                if(strcmp(CURRENT_WORD, ";") == 0) {
+                    THREAD_MEM[THREAD_MEM_SIZE++] = &ret;
+                    STATE.mode = MODE_EXECUTE;
+                    continue;
+                }
+
+                struct dict_entry* w = find_in_dict(&DICT_ALLOC, CURRENT_WORD);
+                if(w == NULL) {
+                    THREAD_MEM[THREAD_MEM_SIZE++] = atoi(CURRENT_WORD);
+                } else {
+                    if(w->is_colon_word) {
+                        THREAD_MEM[THREAD_MEM_SIZE++] = &docol;
+                    }
+                    THREAD_MEM[THREAD_MEM_SIZE++] = w->fptr;
+                }
+            }
+            else {
+                // Enter compiler
+                if(strcmp(CURRENT_WORD, ":") == 0) {
+                    STATE.mode = MODE_COMPILE;
+                    first_entry = true;
+                    continue;
+                }
+
+
+                struct dict_entry* w = find_in_dict(&DICT_ALLOC, CURRENT_WORD);
+                if(w == NULL) {
+                    /* Try pushing it to the stack */
+                    stack_push((int64_t)atoi(CURRENT_WORD));
+                } else {
+                    if(w->is_colon_word) {
+                        PROGRAM[0] = &docol;
+                        PROGRAM[1] = w->fptr;
+                    } else {
+                        PROGRAM[0] = w->fptr;
+                        PROGRAM[1] = NULL;
+                    }
+
+                    PROGRAM[2] = NULL;
+                    execute_word();
+                }
             }
         }
     }
